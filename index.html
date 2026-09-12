@@ -1,0 +1,834 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#080a0f">
+<title>숨은 박</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#080a0f;color:#e8eef7;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+  canvas{display:block;width:100%;height:100%}
+  #gear{position:fixed;right:12px;top:calc(12px + env(safe-area-inset-top));width:38px;height:38px;border:0;
+    border-radius:11px;background:rgba(255,255,255,.06);color:#8496b0;font-size:18px;cursor:pointer;z-index:5}
+  #gear:hover{background:rgba(255,255,255,.12)}
+  #panel{position:fixed;right:12px;top:calc(58px + env(safe-area-inset-top));z-index:5;width:246px;display:none;
+    background:#111621;border:1px solid #242e46;border-radius:14px;padding:15px 16px 17px}
+  #panel.on{display:block}
+  #panel h3{font-size:13px;font-weight:600;color:#8496b0;margin-bottom:11px;letter-spacing:.02em}
+  #panel label{display:flex;justify-content:space-between;font-size:13px;color:#c3d0e2;margin-bottom:7px}
+  #panel label b{color:#5ad1ff;font-variant-numeric:tabular-nums}
+  #off{width:100%;accent-color:#5ad1ff}
+  #panel p{font-size:11.5px;line-height:1.55;color:#6b7c95;margin-top:10px}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<button id="gear" aria-label="설정">⚙</button>
+<div id="panel">
+  <h3>설정</h3>
+  <label>입력 오프셋 <b id="offv">0 ms</b></label>
+  <input id="off" type="range" min="-100" max="100" step="1" value="0">
+  <p>탭이 실제보다 <b>늦게</b> 잡히면 음수로,<br><b>빠르게</b> 잡히면 양수로 맞추세요.</p>
+</div>
+<script>
+"use strict";
+
+/* ────────────────────────────────────────────────────────────────
+   난이도 표 — 튜닝은 이 표만 고친다 (프로젝트 컨벤션)
+   ──────────────────────────────────────────────────────────────── */
+var DIFFS = {
+  기본: {
+    bpm: 100,            // 박 간격 0.6초
+    duration: 60,        // 한 판 길이(초)
+    perfect: 0.040,      // PERFECT 판정 ±초
+    good: 0.090,         // GOOD 판정 ±초 (= 놓침 판정 시각)
+    countIn: 4,          // 시작 카운트인 박 수(판정 없음)
+    soundBeats: 4,       // 소리 마디 길이(항상 고정)
+    // 콤보가 minCombo 이상일 때 무음 마디 길이 = beats (= 그 마디 최대 배율)
+    silenceTable: [
+      { minCombo: 0,  beats: 2 },
+      { minCombo: 4,  beats: 4 },
+      { minCombo: 8,  beats: 6 },
+      { minCombo: 16, beats: 8 }
+    ],
+    scorePerfect: 3,
+    scoreGood: 1
+  }
+};
+var DIFF = DIFFS.기본;
+
+/* ────────────────────────────────────────────────────────────────
+   저장 어댑터: window.storage → localStorage → 메모리
+   ──────────────────────────────────────────────────────────────── */
+var Store = (function () {
+  var mem = {};
+  function backend() {
+    try { if (window.storage && window.storage.getItem) return window.storage; } catch (e) {}
+    try { var k = "__t"; localStorage.setItem(k, "1"); localStorage.removeItem(k); return localStorage; } catch (e) {}
+    return { getItem: function (k) { return k in mem ? mem[k] : null; },
+             setItem: function (k, v) { mem[k] = String(v); } };
+  }
+  var b = backend();
+  return {
+    get: function (k, d) { try { var v = b.getItem("beat." + k); return v === null ? d : v; } catch (e) { return d; } },
+    set: function (k, v) { try { b.setItem("beat." + k, String(v)); } catch (e) {} },
+    num: function (k, d) { var v = parseFloat(this.get(k, "")); return isFinite(v) ? v : d; }
+  };
+})();
+
+/* ────────────────────────────────────────────────────────────────
+   엔진 — 순수 로직. 오디오/그래픽 없음.
+   시계는 바깥에서 주입한다(라이브는 AudioContext.currentTime, 리플레이는 기록된 시각).
+   advanceTo() 호출 간격이 달라도 결과가 같아야 한다 = 주사율 독립.
+   ──────────────────────────────────────────────────────────────── */
+function silenceFor(diff, combo) {
+  var n = diff.silenceTable[0].beats;
+  for (var i = 0; i < diff.silenceTable.length; i++)
+    if (combo >= diff.silenceTable[i].minCombo) n = diff.silenceTable[i].beats;
+  return n;
+}
+
+function createEngine(diff, t0) {
+  var beatDur = 60 / diff.bpm;
+  var endTime = t0 + diff.duration;
+
+  var s = {
+    t0: t0, endTime: endTime, beatDur: beatDur,
+    beats: [],              // 생성된 박 전부 (미판정은 항상 정확히 1개)
+    time: t0 - 1e9,         // 엔진이 진행한 시각
+    score: 0, combo: 0, maxCombo: 0,
+    perfect: 0, good: 0, miss: 0,
+    errSum: 0, errN: 0,
+    silentRun: 0, bestSilentRun: 0,
+    bestMult: 0,
+    phase: "sound", phasePos: 0, silenceLen: 0,
+    resetStruct: false, noMore: false, finished: false,
+    events: []              // 표현 계층이 소비하는 판정 이벤트
+  };
+
+  function pending() {
+    var b = s.beats[s.beats.length - 1];
+    return b && !b.resolved ? b : null;
+  }
+
+  function genNext() {
+    if (s.noMore) return;
+    var last = s.beats[s.beats.length - 1];
+    var time = last ? last.time + beatDur : t0;
+    if (time > endTime + 1e-9) { s.noMore = true; return; }
+
+    if (!last || s.resetStruct) {
+      // 시작 또는 MISS 복귀 → 소리 마디 처음부터
+      s.phase = "sound"; s.phasePos = 0; s.resetStruct = false;
+    } else {
+      s.phasePos++;
+      var len = s.phase === "sound" ? diff.soundBeats : s.silenceLen;
+      if (s.phasePos >= len) {
+        s.phasePos = 0;
+        if (s.phase === "sound") { s.phase = "silent"; s.silenceLen = silenceFor(diff, s.combo); }
+        else { s.phase = "sound"; }
+      }
+    }
+    var silent = s.phase === "silent";
+    s.beats.push({
+      i: s.beats.length, time: time, silent: silent, pos: s.phasePos,
+      silenceLen: silent ? s.silenceLen : 0,
+      mult: silent ? s.phasePos + 1 : 1,
+      resolved: false, judge: null, err: 0, scheduled: false
+    });
+  }
+
+  function resolve(b, judge, err, kind) {
+    b.resolved = true; b.judge = judge; b.err = err;
+    var gained = 0;
+    if (judge === "MISS") {
+      s.miss++; s.combo = 0; s.silentRun = 0; s.resetStruct = true;
+    } else {
+      gained = (judge === "PERFECT" ? diff.scorePerfect : diff.scoreGood) * b.mult;
+      s.score += gained;
+      s.combo++; if (s.combo > s.maxCombo) s.maxCombo = s.combo;
+      if (judge === "PERFECT") s.perfect++; else s.good++;
+      s.errSum += Math.abs(err); s.errN++;
+      if (b.mult > s.bestMult) s.bestMult = b.mult;
+      if (b.silent) { s.silentRun++; if (s.silentRun > s.bestSilentRun) s.bestSilentRun = s.silentRun; }
+      else s.silentRun = 0;
+    }
+    s.events.push({ judge: judge, err: err, kind: kind, mult: b.mult,
+                    silent: b.silent, gained: gained, score: s.score, combo: s.combo });
+    genNext();
+  }
+
+  function advanceTo(t) {
+    if (t <= s.time) return;
+    for (;;) {
+      var b = pending();
+      if (!b) break;
+      var deadline = b.time + diff.good;
+      if (deadline <= t) { s.time = deadline; resolve(b, "MISS", null, "late"); }
+      else break;
+    }
+    if (t > s.time) s.time = t;
+    if (!pending() && (s.noMore || s.time >= endTime)) s.finished = true;
+  }
+
+  function tap(t) {
+    if (s.finished) return null;
+    if (t > s.time) advanceTo(t);
+    if (s.finished) return null;
+    var b = pending();
+    if (!b) return null;
+
+    var err = t - b.time;
+    if (Math.abs(err) <= diff.good) {
+      resolve(b, Math.abs(err) <= diff.perfect ? "PERFECT" : "GOOD", err, "hit");
+      return s.events[s.events.length - 1];
+    }
+    // 빗나감: 판정 창 밖 입력
+    var prev = s.beats[b.i - 1];
+    var closerToPrev = prev && prev.resolved && Math.abs(t - prev.time) < Math.abs(err);
+    if (closerToPrev) {
+      // 같은 박에 두 번째 입력 → 그 박은 이미 판정됨. 벌점만 적용(다음 박은 살려둔다).
+      s.miss++; s.combo = 0; s.silentRun = 0; s.resetStruct = true;
+      s.events.push({ judge: "MISS", err: t - prev.time, kind: "double", mult: 1,
+                      silent: prev.silent, gained: 0, score: s.score, combo: 0 });
+      return s.events[s.events.length - 1];
+    }
+    resolve(b, "MISS", err, "swing");   // 다가올 박을 향해 헛스윙 → 그 박은 날아간다
+    return s.events[s.events.length - 1];
+  }
+
+  return { s: s, pending: pending, advanceTo: advanceTo, tap: tap, genNext: genNext,
+           start: function () { if (!s.beats.length) genNext(); } };
+}
+
+function summarize(s) {
+  var hit = s.perfect + s.good;
+  return {
+    score: s.score,
+    perfect: s.perfect, good: s.good, miss: s.miss,
+    perfectRate: hit + s.miss > 0 ? s.perfect / (hit + s.miss) : 0,
+    maxCombo: s.maxCombo,
+    bestSilentRun: s.bestSilentRun,
+    bestMult: s.bestMult,
+    avgErrMs: s.errN ? (s.errSum / s.errN) * 1000 : 0,
+    beats: s.beats.length
+  };
+}
+
+/* ────────────────────────────────────────────────────────────────
+   오디오 — 시계는 AudioContext.currentTime 하나뿐.
+   박은 lookahead 스케줄러로 미리 예약한다. setTimeout 으로 박을 만들지 않는다.
+   ──────────────────────────────────────────────────────────────── */
+var AC = null, master = null, clockOffset = 0;
+var LOOKAHEAD = 0.100, TICK = 25;
+
+function audioInit() {
+  if (AC) return;
+  var C = window.AudioContext || window.webkitAudioContext;
+  AC = new C();
+  master = AC.createGain();
+  master.gain.value = 0.9;
+  master.connect(AC.destination);
+}
+function audioNow() { return AC ? AC.currentTime : performance.now() / 1000; }
+function syncClock() { clockOffset = audioNow() - performance.now() / 1000; }
+function perfToAudio(ms) { return ms / 1000 + clockOffset; }
+
+function tone(t, freq, dur, type, vol, sweep) {
+  if (!AC) return;
+  var o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || "sine";
+  o.frequency.setValueAtTime(freq, t);
+  if (sweep) o.frequency.exponentialRampToValueAtTime(Math.max(30, sweep), t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(master);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function clickAt(t, accent) {
+  tone(t, accent ? 1320 : 880, accent ? 0.085 : 0.055, "square", accent ? 0.30 : 0.17);
+  tone(t, accent ? 330 : 220, 0.045, "sine", accent ? 0.28 : 0.16);
+}
+function sfxHit(judge, mult, silent) {
+  if (!AC) return;
+  var t = audioNow() + 0.001;
+  if (judge === "MISS") { tone(t, 180, 0.20, "sawtooth", 0.22, 60); return; }
+  if (!silent) { tone(t, judge === "PERFECT" ? 1200 : 700, 0.05, "triangle", 0.12); return; }
+  // 무음 성공: 배율에 비례해 피치가 오른다 (원칙 7)
+  var base = 392 * Math.pow(2, (mult - 1) / 6);
+  tone(t, base, judge === "PERFECT" ? 0.20 : 0.10, "triangle", 0.26, base * (judge === "PERFECT" ? 2 : 1.2));
+  if (judge === "PERFECT") tone(t + 0.01, base * 1.5, 0.16, "sine", 0.13, base * 3);
+}
+function sfxBest() {
+  if (!AC) return;
+  var t = audioNow() + 0.01;
+  [523, 659, 784, 1047].forEach(function (f, i) { tone(t + i * 0.07, f, 0.22, "triangle", 0.22); });
+}
+function sfxOver() {
+  if (!AC) return;
+  var t = audioNow() + 0.01;
+  [440, 349, 262].forEach(function (f, i) { tone(t + i * 0.12, f, 0.32, "sine", 0.2); });
+}
+
+/* ────────────────────────────────────────────────────────────────
+   화면
+   ──────────────────────────────────────────────────────────────── */
+var cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+var W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2.5);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener("resize", resize);
+
+var reduceMotion = false;
+try {
+  var mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+  reduceMotion = mq.matches;
+  mq.addEventListener ? mq.addEventListener("change", function (e) { reduceMotion = e.matches; })
+                      : mq.addListener(function (e) { reduceMotion = e.matches; });
+} catch (e) {}
+
+var COL = {
+  bg: "#080a0f", live: "#5ad1ff", silent: "#2a3346",
+  early: "#57b8ff", late: "#ff5a5a", gold: "#ffd24a", text: "#e8eef7", sub: "#7a8ba5"
+};
+
+
+var fx = {
+  pulse: -99,      // 마지막 소리 박 시각(오디오 시계)
+  shake: 0, flash: 0, flashCol: "#fff",
+  judge: null,     // {judge, err, at, mult, silent}
+  parts: [],
+  bestGlow: 0, bestMsg: 0
+};
+function spawnParts(n, power) {
+  if (reduceMotion) n = Math.min(n, 6);
+  for (var i = 0; i < n; i++) {
+    var a = Math.random() * Math.PI * 2, sp = (1.6 + Math.random() * 2.6) * power;
+    fx.parts.push({ x: 0, y: 0, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, hue: 190 + Math.random() * 60 });
+  }
+}
+
+function fmtErr(err) {
+  var ms = Math.round(err * 1000);
+  return (ms > 0 ? "+" : "") + ms + "ms";
+}
+
+/* ────────────────────────────────────────────────────────────────
+   게임 상태
+   ──────────────────────────────────────────────────────────────── */
+var G = {
+  mode: "title",        // title | countin | play | over
+  eng: null,
+  t0: 0,                // 첫 판정 박의 오디오 시각
+  inputs: [],           // t0 기준 상대 시각 — 리플레이 입력 기록(원칙 1)
+  countIn: [],
+  best: Store.num("best", 0),
+  beatBest: false,      // 이번 판에서 최고 기록을 넘었는가
+  result: null,
+  overAt: 0
+};
+var offsetMs = Store.num("offset", 0);
+
+function guardSec() { return 0.030 + Math.max(0, -offsetMs / 1000); }
+
+function startRun() {
+  audioInit();
+  if (AC.state === "suspended") AC.resume();
+  syncClock();
+  var bd = 60 / DIFF.bpm;
+  var lead = 0.35;
+  G.t0 = audioNow() + lead + DIFF.countIn * bd;
+  G.countIn = [];
+  for (var i = 0; i < DIFF.countIn; i++)
+    G.countIn.push({ time: G.t0 - (DIFF.countIn - i) * bd, n: DIFF.countIn - i, scheduled: false, pulsed: false });
+  G.eng = createEngine(DIFF, G.t0);
+  G.eng.start();
+  G.inputs = [];
+  G.beatBest = false;
+  G.result = null;
+  G.mode = "countin";
+  evCursor = 0;
+  fx.judge = null; fx.parts.length = 0; fx.pulse = -99; fx.shake = 0; fx.flash = 0;
+  fx.bestGlow = 0; fx.bestMsg = 0;
+}
+
+function endRun() {
+  G.result = summarize(G.eng.s);
+  G.mode = "over";
+  G.overAt = audioNow();
+  if (G.result.score > G.best) { G.best = G.result.score; Store.set("best", G.best); }
+  sfxOver();
+}
+
+/* 오디오 스케줄러 + 엔진 진행 — 25ms 주기. 그리기와 분리되어 있다. */
+function scheduler() {
+  if (!AC || (G.mode !== "countin" && G.mode !== "play")) return;
+  var now = audioNow(), horizon = now + LOOKAHEAD;
+
+  for (var i = 0; i < G.countIn.length; i++) {
+    var c = G.countIn[i];
+    if (!c.scheduled && c.time <= horizon) { c.scheduled = true; clickAt(c.time, c.n === DIFF.countIn); }
+  }
+  var beats = G.eng.s.beats;
+  for (var j = 0; j < beats.length; j++) {
+    var b = beats[j];
+    if (!b.scheduled && !b.silent && b.time <= horizon) { b.scheduled = true; clickAt(b.time, b.pos === 0); }
+  }
+
+  if (G.mode === "countin" && now >= G.t0 - DIFF.good) G.mode = "play";
+  if (G.mode === "play") {
+    G.eng.advanceTo(now - guardSec());
+    drainEvents();
+    if (G.eng.s.finished) { G.eng.advanceTo(G.eng.s.endTime + DIFF.good + 1); drainEvents(); endRun(); }
+  }
+}
+
+var evCursor = 0;
+function drainEvents() {
+  var ev = G.eng.s.events;
+  while (evCursor < ev.length) {
+    var e = ev[evCursor++];
+    fx.judge = { judge: e.judge, err: e.err, kind: e.kind, mult: e.mult, silent: e.silent, at: audioNow() };
+    if (e.judge === "MISS") {
+      fx.flash = 1; fx.flashCol = COL.late;
+      if (!reduceMotion) fx.shake = 6;
+      sfxHit("MISS", 1, e.silent);
+    } else {
+      var pw = e.silent ? e.mult : 1;
+      if (e.judge === "PERFECT") {
+        spawnParts(e.silent ? 8 + e.mult * 5 : 6, 0.7 + pw * 0.22);
+        if (!reduceMotion && e.silent) fx.shake = Math.min(11, 1.5 + e.mult * 1.15);
+      }
+      sfxHit(e.judge, e.mult, e.silent);
+    }
+    if (!G.beatBest && e.score > G.best && G.best > 0) {
+      G.beatBest = true; fx.bestGlow = 1; fx.bestMsg = 1; sfxBest();
+    }
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────
+   입력
+   ──────────────────────────────────────────────────────────────── */
+function onTapRaw(tsMs) {
+  if (G.mode === "title") { startRun(); return; }
+  if (G.mode === "over") {
+    if (audioNow() - G.overAt < 0.6) return;       // 오발 방지
+    startRun(); return;
+  }
+  var t = perfToAudio(tsMs) + offsetMs / 1000;
+  if (G.mode === "countin") {
+    if (t < G.t0 - DIFF.good) return;              // 카운트인 박은 판정하지 않는다
+    G.mode = "play";                               // 첫 박을 노린 입력이면 바로 시작
+  }
+  if (!G.eng || G.eng.s.finished) return;
+  G.inputs.push(t - G.t0);
+  G.eng.tap(t);
+  drainEvents();
+  if (G.eng.s.finished) endRun();
+}
+function stamp(e) {
+  var ts = e && typeof e.timeStamp === "number" ? e.timeStamp : 0;
+  var now = performance.now();
+  return (ts > 0 && Math.abs(now - ts) < 1000) ? ts : now;
+}
+window.addEventListener("pointerdown", function (e) {
+  if (e.target.closest && e.target.closest("#panel,#gear")) return;
+  e.preventDefault(); onTapRaw(stamp(e));
+}, { passive: false });
+window.addEventListener("keydown", function (e) {
+  if (e.repeat) return;
+  if (e.code === "Space" || e.code === "Enter" || e.code === "ArrowUp") { e.preventDefault(); onTapRaw(stamp(e)); }
+});
+
+/* 설정 */
+var gear = document.getElementById("gear"), panel = document.getElementById("panel"),
+    off = document.getElementById("off"), offv = document.getElementById("offv");
+off.value = String(offsetMs);
+offv.textContent = (offsetMs > 0 ? "+" : "") + offsetMs + " ms";
+gear.addEventListener("click", function (e) { e.stopPropagation(); panel.classList.toggle("on"); });
+off.addEventListener("input", function () {
+  offsetMs = parseInt(off.value, 10) || 0;
+  offv.textContent = (offsetMs > 0 ? "+" : "") + offsetMs + " ms";
+  Store.set("offset", offsetMs);
+});
+
+/* ────────────────────────────────────────────────────────────────
+   그리기 — 모든 움직임에 dt(60fps 환산, [0,3] 클램프)를 곱한다
+   ──────────────────────────────────────────────────────────────── */
+function clamp01(x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+
+function update(dt, now) {
+  var i, b;
+  for (i = 0; i < G.countIn.length; i++) {
+    b = G.countIn[i];
+    if (!b.pulsed && b.time <= now) { b.pulsed = true; fx.pulse = b.time; fx.pulseAccent = (b.n === DIFF.countIn); }
+  }
+  if (G.eng) {
+    var beats = G.eng.s.beats;
+    for (i = 0; i < beats.length; i++) {
+      b = beats[i];
+      if (!b.pulsed && b.time <= now) { b.pulsed = true; if (!b.silent) { fx.pulse = b.time; fx.pulseAccent = (b.pos === 0); } }
+    }
+  }
+  fx.shake *= Math.pow(0.86, dt);
+  if (fx.shake < 0.05) fx.shake = 0;
+  fx.flash *= Math.pow(0.84, dt);
+  fx.bestGlow *= Math.pow(0.97, dt);
+  fx.bestMsg -= dt / 110;
+  if (fx.bestMsg < 0) fx.bestMsg = 0;
+  for (i = fx.parts.length - 1; i >= 0; i--) {
+    var p = fx.parts[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= Math.pow(0.94, dt); p.vy *= Math.pow(0.94, dt);
+    p.life -= dt / 34;
+    if (p.life <= 0) fx.parts.splice(i, 1);
+  }
+}
+
+function draw(now) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = COL.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  if (fx.shake > 0.05) {
+    var a = Math.random() * Math.PI * 2;
+    ctx.translate(Math.cos(a) * fx.shake, Math.sin(a) * fx.shake);
+  }
+
+  if (G.mode === "title") { drawTitle(); }
+  else { drawPlay(now); }
+
+  if (fx.flash > 0.02) {
+    ctx.globalAlpha = fx.flash * 0.22;
+    ctx.fillStyle = fx.flashCol;
+    ctx.fillRect(-40, -40, W + 80, H + 80);
+    ctx.globalAlpha = 1;
+  }
+  if (G.mode === "over") drawOver();
+}
+
+function setFont(size, weight) {
+  ctx.font = (weight || 700) + " " + size + "px -apple-system,BlinkMacSystemFont,system-ui,'Apple SD Gothic Neo','Noto Sans KR',sans-serif";
+}
+function centerText(txt, x, y, size, color, weight, align, maxW) {
+  setFont(size, weight);
+  if (maxW) {                       // 좁은 화면에서 글자가 넘치지 않게 줄인다
+    var w = ctx.measureText(txt).width;
+    if (w > maxW) setFont(Math.max(10, size * maxW / w), weight);
+  }
+  ctx.fillStyle = color;
+  ctx.textAlign = align || "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(txt, x, y);
+}
+
+function drawTitle() {
+  var cy = H * 0.42;
+  var mw = W - 40, sz = Math.min(19, W * 0.048);
+  centerText("숨은 박", W / 2, cy - 46, Math.min(62, W * 0.15), COL.text, 800, "center", mw);
+  centerText("들리는 박에 맞춰 탭하세요.", W / 2, cy + 18, sz, COL.sub, 500, "center", mw);
+  centerText("소리는 사라지지만 박은 계속됩니다.", W / 2, cy + 46, sz, COL.sub, 500, "center", mw);
+  centerText("무음에서 맞힐수록 배율이 커집니다.", W / 2, cy + 74, sz, COL.live, 600, "center", mw);
+  centerText("최고 " + G.best, W / 2, cy + 132, 17, COL.gold, 700);
+  var blink = 0.55 + 0.45 * Math.sin(performance.now() / 380);
+  ctx.globalAlpha = blink;
+  centerText("탭 또는 스페이스로 시작", W / 2, H * 0.80, Math.min(20, W * 0.05), COL.text, 600, "center", mw);
+  ctx.globalAlpha = 1;
+}
+
+function drawPlay(now) {
+  var s = G.eng.s;
+  var pend = G.eng.pending();
+  var silentNow = !!(pend && pend.silent);
+
+  drawHud(now, s, pend);
+
+  var cx = W / 2, cy = H * 0.52;
+  var R = Math.max(54, Math.min(W * 0.27, H * 0.205));
+
+  // 소리 박 펄스. fx.pulse 는 소리 박에서만 갱신되므로 무음 구간에는 저절로 0이 된다.
+  // (마지막 소리 박을 일찍 쳐서 pending 이 이미 무음이어도 그 박의 펄스는 보여야 한다)
+  var pk = 0, e = now - fx.pulse;
+  if (e >= 0 && e < 0.30) pk = clamp01(e < 0.05 ? e / 0.05 : 1 - (e - 0.05) / 0.25);
+  var dark = silentNow && pk < 0.02;
+
+  // 확산 링
+  if (pk > 0 && !reduceMotion) {
+    var prog = clamp01((now - fx.pulse) / 0.42);
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * (1 + prog * 0.85), 0, Math.PI * 2);
+    ctx.strokeStyle = COL.live;
+    ctx.globalAlpha = (1 - prog) * 0.42;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  var accent = fx.pulseAccent ? 1.32 : 1;   // 마디 첫 박은 조금 더 크게 — 4박 구조가 눈에 보이게
+  var r = R * (1 + pk * 0.155 * accent);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  if (dark) {
+    ctx.fillStyle = "#141a27";
+    ctx.fill();
+    ctx.strokeStyle = COL.silent; ctx.lineWidth = 2; ctx.stroke();
+  } else {
+    var g = ctx.createRadialGradient(cx, cy - r * 0.3, r * 0.1, cx, cy, r);
+    g.addColorStop(0, "rgba(90,209,255," + (0.30 + pk * 0.55) + ")");
+    g.addColorStop(1, "rgba(90,209,255,0.06)");
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = "rgba(90,209,255," + (0.5 + pk * 0.5) + ")";
+    ctx.lineWidth = 2 + pk * 2.5; ctx.stroke();
+  }
+
+  if (fx.bestGlow > 0.02) {
+    ctx.beginPath(); ctx.arc(cx, cy, r + 10, 0, Math.PI * 2);
+    ctx.strokeStyle = COL.gold; ctx.globalAlpha = fx.bestGlow * 0.8;
+    ctx.lineWidth = 3; ctx.stroke(); ctx.globalAlpha = 1;
+  }
+
+  // 파편
+  for (var i = 0; i < fx.parts.length; i++) {
+    var p = fx.parts[i];
+    ctx.globalAlpha = clamp01(p.life);
+    ctx.fillStyle = "hsl(" + p.hue + ",95%,66%)";
+    ctx.fillRect(cx + p.x * 7 - 2, cy + p.y * 7 - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  // 카운트인 숫자
+  if (G.mode === "countin") {
+    var left = Math.max(0, Math.ceil((G.t0 - now) / (60 / DIFF.bpm)));
+    centerText(left > 0 ? String(left) : "!", cx, cy, Math.round(R * 0.9), "#0a0e16", 800);
+    centerText("준비", cx, cy + R + 40, 17, COL.sub, 600);
+  }
+
+  // 무음 남은 박 — 점만. 움직이지 않는다.
+  if (silentNow) {
+    var L = pend.silenceLen, remain = L - pend.pos;
+    var gap = 17, x0 = cx - (L - 1) * gap / 2, y0 = cy + R + 34;
+    for (var d = 0; d < L; d++) {
+      ctx.beginPath();
+      ctx.arc(x0 + d * gap, y0, 4.5, 0, Math.PI * 2);
+      if (d >= pend.pos) { ctx.fillStyle = COL.live; ctx.fill(); }
+      else { ctx.strokeStyle = COL.silent; ctx.lineWidth = 1.5; ctx.stroke(); }
+    }
+    ctx.globalAlpha = 0.8;
+    centerText("무음 " + remain + "박", cx, y0 + 26, 13, COL.sub, 600);
+    ctx.globalAlpha = 1;
+  }
+
+  drawJudge(now, cx, cy - R - 46);
+
+  if (fx.bestMsg > 0) {
+    ctx.globalAlpha = clamp01(fx.bestMsg * 1.6);
+    centerText("최고 기록 갱신!", cx, H * 0.86, Math.min(26, W * 0.065), COL.gold, 800);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawJudge(now, x, y) {
+  if (!fx.judge) return;
+  var age = now - fx.judge.at;
+  if (age > 0.4 || age < -0.5) return;
+  var a = clamp01(1 - age / 0.4);
+  var j = fx.judge, label, col;
+  if (j.judge === "PERFECT") { label = "PERFECT"; col = COL.gold; }
+  else if (j.judge === "GOOD") { label = "GOOD"; col = "#b9c8dc"; }
+  else if (j.kind === "late") { label = "놓쳤어요"; col = COL.late; }
+  else if (j.kind === "double") { label = "이미 친 박이에요"; col = COL.late; }
+  else { label = j.err < 0 ? "너무 빨라요" : "너무 느려요"; col = COL.late; }
+
+  ctx.globalAlpha = a;
+  var lift = (1 - a) * 12;
+  centerText(label, x, y - lift, j.judge === "PERFECT" && j.silent ? Math.min(34, 22 + j.mult * 1.6) : 24, col, 800);
+  if (j.err !== null && j.err !== undefined) {
+    var ms = Math.round(j.err * 1000);
+    centerText(fmtErr(j.err), x, y + 26 - lift, 17,
+      ms === 0 ? COL.gold : ms < 0 ? COL.early : COL.late, 700);
+  }
+  if (j.judge !== "MISS" && j.silent && j.mult > 1) {
+    centerText("×" + j.mult, x + 96, y - lift, 24, COL.live, 800);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHud(now, s, pend) {
+  var top = 14;
+  // 남은 시간 바
+  var left = clamp01((s.endTime - Math.max(now, s.t0)) / DIFF.duration);
+  if (G.mode === "countin") left = 1;
+  ctx.fillStyle = "#161c29";
+  ctx.fillRect(0, 0, W, 5);
+  ctx.fillStyle = left < 0.17 ? COL.late : COL.live;
+  ctx.fillRect(0, 0, W * left, 5);
+
+  centerText(String(s.score), 18, top + 26, 34, COL.text, 800, "left");
+  centerText("최고 " + G.best, 18, top + 54, 14, s.score > G.best ? COL.gold : COL.sub, 700, "left");
+
+  var secs = Math.max(0, Math.ceil(s.endTime - Math.max(now, s.t0)));
+  if (G.mode === "countin") secs = DIFF.duration;
+  centerText(secs + "초", W - 60, top + 22, 17, COL.sub, 700, "right");
+
+  if (s.combo > 0) {
+    centerText(s.combo + " 콤보", W - 60, top + 48, 19, COL.live, 800, "right");
+  }
+  var mult = pend ? pend.mult : 1;
+  if (mult > 1) {
+    centerText("×" + mult, W - 60, top + 74, 17, COL.gold, 800, "right");
+  }
+}
+
+function drawOver() {
+  var r = G.result;
+  ctx.fillStyle = "rgba(8,10,15,0.94)";
+  ctx.fillRect(0, 0, W, H);
+  var cy = H * 0.30;
+  centerText("게임 오버", W / 2, cy, Math.min(26, W * 0.07), COL.sub, 700);
+  centerText(String(r.score), W / 2, cy + 58, Math.min(76, W * 0.19), COL.text, 800);
+  var isBest = r.score > 0 && r.score >= G.best;
+  centerText(isBest ? "최고 기록! " + G.best : "최고 " + G.best,
+             W / 2, cy + 110, 17, isBest ? COL.gold : COL.sub, 700);
+
+  var rows = [
+    ["PERFECT 비율", Math.round(r.perfectRate * 100) + "%"],
+    ["최장 무음 성공", r.bestSilentRun + "박"],
+    ["최고 배율", "×" + r.bestMult],
+    ["평균 오차", (r.avgErrMs ? r.avgErrMs.toFixed(0) : "0") + "ms"]
+  ];
+  var y = cy + 160, wBox = Math.min(300, W - 48);
+  for (var i = 0; i < rows.length; i++) {
+    centerText(rows[i][0], W / 2 - wBox / 2, y + i * 30, 15, COL.sub, 600, "left", wBox * 0.6);
+    centerText(rows[i][1], W / 2 + wBox / 2, y + i * 30, 15, COL.text, 700, "right");
+  }
+  var blink = 0.55 + 0.45 * Math.sin(performance.now() / 380);
+  ctx.globalAlpha = blink;
+  centerText("탭해서 다시", W / 2, H * 0.86, Math.min(21, W * 0.055), COL.live, 700);
+  ctx.globalAlpha = 1;
+}
+
+var lastMs = 0;
+function frame(ms) {
+  requestAnimationFrame(frame);
+  var now = audioNow();
+  var dt = lastMs ? (ms - lastMs) / (1000 / 60) : 1;
+  lastMs = ms;
+  dt = Math.max(0, Math.min(3, dt));
+  if (G.mode === "countin" || G.mode === "play" || G.mode === "over") update(dt, now);
+  draw(now);
+}
+resize();
+requestAnimationFrame(frame);
+setInterval(scheduler, TICK);
+
+/* ────────────────────────────────────────────────────────────────
+   자동 플레이 / 리플레이 훅 — window.__beat
+   ──────────────────────────────────────────────────────────────── */
+function sortedInputs(inputs) {
+  return inputs.slice().sort(function (a, b) { return a - b; });
+}
+
+/* 기록된 입력만으로 게임을 재현한다 (원칙 1 검증) */
+function headless(inputs, diff) {
+  var d = diff || DIFF;
+  var eng = createEngine(d, 0); eng.start();
+  var xs = sortedInputs(inputs);
+  for (var i = 0; i < xs.length; i++) { if (eng.s.finished) break; eng.tap(xs[i]); }
+  eng.advanceTo(d.duration + d.good + 1);
+  return summarize(eng.s);
+}
+
+/* 같은 입력을 서로 다른 진행 간격(=주사율)으로 돌려본다 */
+function headlessStepped(inputs, stepSec, diff) {
+  var d = diff || DIFF;
+  var eng = createEngine(d, 0); eng.start();
+  var xs = sortedInputs(inputs), k = 0;
+  var end = d.duration + d.good + 1;
+  for (var t = 0; t <= end; t += stepSec) {
+    while (k < xs.length && xs[k] <= t) eng.tap(xs[k++]);
+    eng.advanceTo(t);
+    if (eng.s.finished) break;
+  }
+  while (k < xs.length) eng.tap(xs[k++]);
+  eng.advanceTo(end);
+  return summarize(eng.s);
+}
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function gauss(rng) {
+  var u, v, s;
+  do { u = rng() * 2 - 1; v = rng() * 2 - 1; s = u * u + v * v; } while (s >= 1 || s === 0);
+  return u * Math.sqrt(-2 * Math.log(s) / s);
+}
+
+/* 오차 σ(ms) 가우시안으로 박을 노리는 봇. 난수는 봇에만 있고 게임에는 없다. */
+function bot(sigmaMs, seed, diff) {
+  var d = diff || DIFF;
+  var rng = mulberry32((seed >>> 0) || 1);
+  var eng = createEngine(d, 0); eng.start();
+  var inputs = [], safety = 0;
+  while (!eng.s.finished && safety++ < 20000) {
+    var b = eng.pending();
+    if (!b) { eng.advanceTo(eng.s.time + eng.s.beatDur); continue; }
+    var t = b.time + gauss(rng) * (sigmaMs / 1000);
+    if (t <= eng.s.time) t = eng.s.time + 1e-6;
+    inputs.push(t);
+    eng.tap(t);
+  }
+  eng.advanceTo(d.duration + d.good + 1);
+  return { result: summarize(eng.s), inputs: inputs };
+}
+
+window.__beat = {
+  get state() {
+    var s = G.eng && G.eng.s, p = G.eng && G.eng.pending();
+    return {
+      mode: G.mode, best: G.best, offsetMs: offsetMs,
+      score: s ? s.score : 0, combo: s ? s.combo : 0,
+      mult: p ? p.mult : 1, silent: !!(p && p.silent),
+      silenceLen: p && p.silent ? p.silenceLen : 0,
+      beatIndex: p ? p.i : -1,
+      remaining: s ? Math.max(0, s.endTime - audioNow()) : DIFF.duration,
+      finished: s ? s.finished : false,
+      result: G.result
+    };
+  },
+  get nextBeatTime() { var b = G.eng && G.eng.pending(); return b ? b.time : null; },
+  now: function () { return audioNow(); },
+  tap: function (atAudioTime) {
+    if (G.mode === "title" || G.mode === "over") { startRun(); return null; }
+    var t = typeof atAudioTime === "number" ? atAudioTime : audioNow();
+    if (G.mode === "countin") { if (t < G.t0 - DIFF.good) return null; G.mode = "play"; }
+    if (!G.eng || G.eng.s.finished) return null;
+    G.inputs.push(t - G.t0);
+    var ev = G.eng.tap(t);
+    drainEvents();
+    if (G.eng.s.finished) endRun();
+    return ev;
+  },
+  reset: function () { startRun(); },
+  inputs: function () { return G.inputs.slice(); },
+  replay: headless,
+  replayStepped: headlessStepped,
+  bot: bot,
+  DIFFS: DIFFS
+};
+</script>
+</body>
+</html>

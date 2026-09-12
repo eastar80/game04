@@ -1,0 +1,12 @@
+{
+  "name": "hidden-beat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "숨은 박 — 무음 속에서 박을 유지하는 원버튼 리듬 게임",
+  "scripts": {
+    "test": "node tests/run.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.1"
+  }
+}
