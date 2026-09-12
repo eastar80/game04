@@ -27,6 +27,47 @@
   #off::-moz-range-track{height:4px;border-radius:3px;background:#26304a}
   #off::-moz-range-thumb{width:16px;height:16px;border:0;border-radius:50%;background:#5ad1ff}
   #panel p{font-size:11.5px;line-height:1.55;color:#6b7c95;margin-top:10px}
+  /* 게임 오버 + 기록 — 목록과 이름 입력은 캔버스보다 DOM 이 맞다 */
+  #over{position:fixed;inset:0;z-index:4;display:none;background:rgba(8,10,15,.94);
+    overflow-y:auto;overscroll-behavior:contain;padding:24px 16px 32px}
+  #over.on{display:block}
+  #ov{max-width:420px;margin:0 auto;display:flex;flex-direction:column;gap:18px}
+  .ov-head{display:flex;flex-direction:column;align-items:center;gap:4px}
+  .ov-head .lbl{font-size:14px;color:#7a8ba5;font-weight:700}
+  .ov-head .sc{font-size:62px;font-weight:800;line-height:1.05;font-variant-numeric:tabular-nums}
+  .ov-head .bst{font-size:14px;font-weight:700;color:#7a8ba5}
+  .ov-head .bst.new{color:#ffd24a}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#1b2231;border-radius:12px;overflow:hidden}
+  .stats div{background:#0f131d;padding:10px 12px;display:flex;justify-content:space-between;gap:8px}
+  .stats dt{font-size:12.5px;color:#7a8ba5}
+  .stats dd{font-size:13px;font-weight:700;color:#e8eef7;font-variant-numeric:tabular-nums}
+  .submit{display:flex;gap:8px}
+  .submit input{flex:1;min-width:0;background:#0f131d;border:1px solid #26304a;border-radius:10px;
+    padding:10px 12px;color:#e8eef7;font-size:15px;font-family:inherit}
+  .submit input::placeholder{color:#55657d}
+  .submit button,.again{border:0;border-radius:10px;font-family:inherit;font-size:15px;font-weight:700;cursor:pointer}
+  .submit button{padding:10px 16px;background:#1d5e7a;color:#d6f2ff;white-space:nowrap}
+  .submit button:disabled{background:#182030;color:#55657d;cursor:default}
+  .note{font-size:12px;color:#7a8ba5;text-align:center;min-height:16px}
+  .note.warn{color:#ff8a8a}
+  .tabs{display:flex;gap:6px}
+  .tabs button{flex:1;padding:9px 0;border:0;border-radius:10px;background:#121722;color:#7a8ba5;
+    font-family:inherit;font-size:13.5px;font-weight:700;cursor:pointer}
+  .tabs button[aria-selected="true"]{background:#1b2231;color:#e8eef7}
+  #list{display:flex;flex-direction:column;gap:1px;background:#1b2231;border-radius:12px;overflow:hidden;
+    max-height:46vh;overflow-y:auto;overscroll-behavior:contain}
+  .row{background:#0f131d;padding:9px 12px;display:grid;grid-template-columns:30px 1fr auto;
+    align-items:center;gap:10px;font-size:13.5px}
+  .row.mine{background:#132030}
+  .row .rk{color:#55657d;font-weight:700;font-variant-numeric:tabular-nums}
+  .row .nm{color:#c3d0e2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .sc{color:#e8eef7;font-weight:800;font-variant-numeric:tabular-nums}
+  .row .sub{grid-column:2/4;color:#6b7c95;font-size:11.5px;font-variant-numeric:tabular-nums}
+  .row.gap{display:block;background:#0b0e16;color:#55657d;text-align:center;padding:6px;font-size:11.5px}
+  .empty{background:#0f131d;padding:22px 12px;text-align:center;color:#6b7c95;font-size:13px;line-height:1.6}
+  .again{padding:14px;background:#5ad1ff;color:#04121a;font-size:16px}
+  #gear:focus-visible,#off:focus-visible,#over button:focus-visible,#nick:focus-visible{
+    outline:2px solid #5ad1ff;outline-offset:2px}
 </style>
 </head>
 <body>
@@ -37,6 +78,27 @@
   <label>입력 오프셋 <b id="offv">0 ms</b></label>
   <input id="off" type="range" min="-100" max="100" step="1" value="0">
   <p>탭이 실제보다 <b>늦게</b> 잡히면 음수로,<br><b>빠르게</b> 잡히면 양수로 맞추세요.</p>
+</div>
+<div id="over" role="dialog" aria-label="게임 결과">
+  <div id="ov">
+    <div class="ov-head">
+      <span class="lbl">게임 오버</span>
+      <span class="sc" id="ovScore">0</span>
+      <span class="bst" id="ovBest">최고 0</span>
+    </div>
+    <dl class="stats" id="ovStats"></dl>
+    <div class="submit">
+      <input id="nick" maxlength="12" placeholder="이름 (12자)" autocomplete="off" spellcheck="false">
+      <button id="send" type="button">등록</button>
+    </div>
+    <p class="note" id="ovNote"></p>
+    <div class="tabs" role="tablist">
+      <button id="tabAll" type="button" role="tab" aria-selected="true">전체 랭킹</button>
+      <button id="tabMine" type="button" role="tab" aria-selected="false">내 기록</button>
+    </div>
+    <div id="list"></div>
+    <button class="again" id="again" type="button">다시 (스페이스)</button>
+  </div>
 </div>
 <script>
 "use strict";
@@ -69,20 +131,150 @@ var DIFF = DIFFS.기본;
    저장 어댑터: window.storage → localStorage → 메모리
    ──────────────────────────────────────────────────────────────── */
 var Store = (function () {
+  // stacker 에서 검증된 형태: 아티팩트 환경의 window.storage 는 비동기이고 {value} 를 준다.
+  // 예전 동기 getItem/setItem 형태도 받아준다. 둘 다 없으면 localStorage → 메모리.
   var mem = {};
-  function backend() {
-    try { if (window.storage && window.storage.getItem) return window.storage; } catch (e) {}
-    try { var k = "__t"; localStorage.setItem(k, "1"); localStorage.removeItem(k); return localStorage; } catch (e) {}
-    return { getItem: function (k) { return k in mem ? mem[k] : null; },
-             setItem: function (k, v) { mem[k] = String(v); } };
-  }
-  var b = backend();
+  var W = null;
+  try { if (window.storage && window.storage.get && window.storage.set) W = window.storage; } catch (e) {}
+  function local(k) { try { return localStorage.getItem(k); } catch (e) { return k in mem ? mem[k] : null; } }
+  function localSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { mem[k] = v; } }
   return {
-    get: function (k, d) { try { var v = b.getItem("beat." + k); return v === null ? d : v; } catch (e) { return d; } },
-    set: function (k, v) { try { b.setItem("beat." + k, String(v)); } catch (e) {} },
-    num: function (k, d) { var v = parseFloat(this.get(k, "")); return isFinite(v) ? v : d; }
+    get: function (k) {
+      var key = "beat." + k;
+      if (W) return Promise.resolve(W.get(key)).then(function (r) {
+        return r && typeof r === "object" ? (r.value === undefined ? null : r.value) : r;
+      }).catch(function () { return null; });
+      try { if (window.storage && window.storage.getItem) return Promise.resolve(window.storage.getItem(key)); } catch (e) {}
+      return Promise.resolve(local(key));
+    },
+    set: function (k, v) {
+      var key = "beat." + k, val = String(v);
+      if (W) { try { return Promise.resolve(W.set(key, val)).catch(function () {}); } catch (e) { return Promise.resolve(); } }
+      try { if (window.storage && window.storage.setItem) { window.storage.setItem(key, val); return Promise.resolve(); } } catch (e) {}
+      localSet(key, val);
+      return Promise.resolve();
+    },
+    json: function (k, d) {
+      return this.get(k).then(function (raw) {
+        if (!raw) return d;
+        try { var v = JSON.parse(raw); return v === null ? d : v; } catch (e) { return d; }
+      });
+    },
+    num: function (k, d) {
+      return this.get(k).then(function (raw) { var v = parseFloat(raw); return isFinite(v) ? v : d; });
+    }
   };
 })();
+
+/* ────────────────────────────────────────────────────────────────
+   기록 — 로컬 전체 기록 + 온라인 랭킹 (Supabase REST)
+
+   JS 클라이언트 라이브러리 없이 fetch 만 쓴다("외부 라이브러리 없음" 컨벤션).
+   아래 키는 공개용(publishable)이라 HTML 에 그대로 들어가도 된다. 실제 방어는
+   서버의 RLS 정책과 CHECK 제약(점수 상한, 이름 길이)이 한다.
+   네트워크가 어떤 이유로 막히든 게임과 로컬 기록은 그대로 돌아가야 한다.
+   ──────────────────────────────────────────────────────────────── */
+var API_URL = "https://czefdonwmxldnxefsubh.supabase.co/rest/v1/beat_scores";
+var API_KEY = "sb_publishable_J7xd_-AgszYcyFJaX5qpKg_Nx-YDPzQ";
+var TOP_N = 10;
+var FRESH_MS = 30000;         // 이 시간 안에 받아온 것은 다시 부르지 않는다
+var NET_MS = 6000;            // 응답이 없으면 "불러오는 중"에 머무르지 않고 내 기록을 보여준다
+var RUNS_CAP = 500;           // 전체 기록 보관 한도
+
+var Rec = {
+  runs: [],                   // 전체 기록. 최신이 앞
+  name: "",
+  playerId: "",
+  loaded: false,
+  online: null                // { state:'loading'|'ok'|'error', rows, rank, at }
+};
+
+function apiHeaders() { return { apikey: API_KEY, Authorization: "Bearer " + API_KEY }; }
+function netSignal() { try { return AbortSignal.timeout ? AbortSignal.timeout(NET_MS) : undefined; } catch (e) { return undefined; } }
+
+function bestScore() { return Rec.runs.length ? Math.max.apply(null, Rec.runs.map(function (r) { return r.score; })) : 0; }
+
+function recordRun(r) {
+  Rec.runs.unshift({
+    t: Date.now(), score: r.score, perfectRate: +r.perfectRate.toFixed(4),
+    maxCombo: r.maxCombo, bestSilentRun: r.bestSilentRun, bestMult: r.bestMult,
+    avgErrMs: Math.round(r.avgErrMs), miss: r.miss
+  });
+  if (Rec.runs.length > RUNS_CAP) Rec.runs.length = RUNS_CAP;
+  Store.set("runs", JSON.stringify(Rec.runs));
+}
+
+function loadAll() {
+  return Promise.all([
+    Store.json("runs", []), Store.get("name"), Store.get("playerId"), Store.num("offset", 0),
+    Store.num("best", 0)
+  ]).then(function (v) {
+    Rec.runs = Array.isArray(v[0]) ? v[0] : [];
+    Rec.name = (v[1] || "").slice(0, 12);
+    Rec.playerId = v[2] || "";
+    if (!Rec.playerId) {
+      Rec.playerId = (self.crypto && crypto.randomUUID) ? crypto.randomUUID()
+                   : Date.now() + "-" + Math.random().toString(36).slice(2, 10);
+      Store.set("playerId", Rec.playerId);
+    }
+    offsetMs = v[3];
+    // 전체 기록이 생기기 전(예전 버전)에 저장된 최고 점수를 이어받는다
+    G.best = Math.max(bestScore(), v[4] || 0);
+    Rec.loaded = true;
+    syncOffsetUI();
+    loadOnline();
+  });
+}
+
+/* 상위 TOP_N */
+function fetchTop() {
+  var q = "?select=name,score,player_id&order=score.desc,created_at.asc&limit=" + TOP_N;
+  return fetch(API_URL + q, { headers: apiHeaders(), signal: netSignal() }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  });
+}
+
+/* 내 점수보다 높은 기록이 몇 개인지 세어 순위를 낸다 (Content-Range: "0-0/123") */
+function fetchRank(score) {
+  var q = "?score=gt." + score + "&select=id";
+  var h = apiHeaders(); h.Prefer = "count=exact"; h.Range = "0-0";
+  return fetch(API_URL + q, { headers: h, signal: netSignal() }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    var total = parseInt((r.headers.get("content-range") || "").split("/")[1], 10);
+    return isFinite(total) ? total + 1 : null;
+  });
+}
+
+function loadOnline() {
+  if (!Rec.loaded) return;                       // playerId 가 준비되기 전에는 부르지 않는다
+  var c = Rec.online;
+  // 받아오는 중이거나 신선하면 다시 부르지 않는다. 실패한 것도 잠시 쉬었다 재시도해야
+  // 렌더 → 실패 → 렌더가 무한히 도는 것을 막는다.
+  if (c && (c.state === "loading" || Date.now() - c.at < FRESH_MS)) return;
+  Rec.online = { state: "loading", at: Date.now() };
+  var mine = bestScore();
+  Promise.all([fetchTop(), mine ? fetchRank(mine).catch(function () { return null; }) : null])
+    .then(function (v) { Rec.online = { state: "ok", rows: v[0], rank: v[1], at: Date.now() }; })
+    .catch(function () { Rec.online = { state: "error", at: Date.now() }; })
+    .then(function () { renderBoard(); });
+}
+
+/* 제출은 게임을 막지 않는다 — 실패해도 로컬 기록은 이미 저장돼 있다 */
+function submitOnline(name, score) {
+  var h = apiHeaders();
+  h["Content-Type"] = "application/json";
+  h.Prefer = "return=minimal";
+  return fetch(API_URL, {
+    method: "POST", headers: h, signal: netSignal(),
+    body: JSON.stringify({ name: name, score: score, player_id: Rec.playerId })
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    Rec.online = null;                           // 새 기록이 보이도록 캐시를 버리고
+    loadOnline();                                // 그 자리에서 다시 부른다
+    return true;
+  }).catch(function () { return false; });
+}
 
 /* ────────────────────────────────────────────────────────────────
    엔진 — 순수 로직. 오디오/그래픽 없음.
@@ -335,12 +527,12 @@ var G = {
   t0: 0,                // 첫 판정 박의 오디오 시각
   inputs: [],           // t0 기준 상대 시각 — 리플레이 입력 기록(원칙 1)
   countIn: [],
-  best: Store.num("best", 0),
+  best: 0,                   // loadAll() 이 채운다
   beatBest: false,      // 이번 판에서 최고 기록을 넘었는가
   result: null,
   overAt: 0
 };
-var offsetMs = Store.num("offset", 0);
+var offsetMs = 0;            // loadAll() 이 채운다
 
 function guardSec() { return 0.030 + Math.max(0, -offsetMs / 1000); }
 
@@ -364,6 +556,7 @@ function whenClockRunning(cb) {
 }
 
 function startRun() {
+  hideOver();
   audioInit();
   G.mode = "boot";                 // 시계가 깰 때까지는 판을 만들지 않는다
   G.eng = null; G.result = null; G.countIn = [];
@@ -392,8 +585,11 @@ function endRun() {
   G.result = summarize(G.eng.s);
   G.mode = "over";
   G.overAt = audioNow();
+  recordRun(G.result);                       // 모든 판을 전체 기록에 남긴다
   if (G.result.score > G.best) { G.best = G.result.score; Store.set("best", G.best); }
+  loadOnline();                              // 내 순위가 바뀌었을 수 있다
   sfxOver();
+  renderOver();
 }
 
 /* 오디오 스케줄러 + 엔진 진행 — 25ms 주기. 그리기와 분리되어 있다. */
@@ -449,10 +645,7 @@ function drainEvents() {
 function onTapRaw(tsMs) {
   if (G.mode === "boot") return;              // 시계 깨는 중
   if (G.mode === "title") { startRun(); return; }
-  if (G.mode === "over") {
-    if (audioNow() - G.overAt < 0.6) return;       // 오발 방지
-    startRun(); return;
-  }
+  if (G.mode === "over") return;              // 재시작은 "다시" 버튼 또는 스페이스
   var t = perfToAudio(tsMs) + offsetMs / 1000;
   if (G.mode === "countin") {
     if (t < G.t0 - DIFF.good) return;              // 카운트인 박은 판정하지 않는다
@@ -470,19 +663,30 @@ function stamp(e) {
   return (ts > 0 && Math.abs(now - ts) < 1000) ? ts : now;
 }
 window.addEventListener("pointerdown", function (e) {
-  if (e.target.closest && e.target.closest("#panel,#gear")) return;
+  if (e.target.closest && e.target.closest("#panel,#gear,#over")) return;
   e.preventDefault(); onTapRaw(stamp(e));
 }, { passive: false });
 window.addEventListener("keydown", function (e) {
   if (e.repeat) return;
-  if (e.code === "Space" || e.code === "Enter" || e.code === "ArrowUp") { e.preventDefault(); onTapRaw(stamp(e)); }
+  if (e.target && e.target.tagName === "INPUT") {          // 이름 입력 중에는 가로채지 않는다
+    if (e.code === "Enter") { e.preventDefault(); elSend.click(); }
+    return;
+  }
+  if (e.code === "Space" || e.code === "Enter" || e.code === "ArrowUp") {
+    e.preventDefault();
+    if (G.mode === "over") { hideOver(); startRun(); return; }
+    onTapRaw(stamp(e));
+  }
 });
 
 /* 설정 */
 var gear = document.getElementById("gear"), panel = document.getElementById("panel"),
     off = document.getElementById("off"), offv = document.getElementById("offv");
-off.value = String(offsetMs);
-offv.textContent = (offsetMs > 0 ? "+" : "") + offsetMs + " ms";
+function syncOffsetUI() {
+  off.value = String(offsetMs);
+  offv.textContent = (offsetMs > 0 ? "+" : "") + offsetMs + " ms";
+}
+syncOffsetUI();
 gear.addEventListener("click", function (e) { e.stopPropagation(); panel.classList.toggle("on"); });
 off.addEventListener("input", function () {
   offsetMs = parseInt(off.value, 10) || 0;
@@ -542,7 +746,6 @@ function draw(now) {
     ctx.fillRect(-40, -40, W + 80, H + 80);
     ctx.globalAlpha = 1;
   }
-  if (G.mode === "over") drawOver();
 }
 
 function setFont(size, weight) {
@@ -692,6 +895,16 @@ function drawJudge(now, x, y) {
   ctx.globalAlpha = 1;
 }
 
+/* 지금 점수 바로 위에 있는 순위. 리더보드는 게임이 끝나야 보이므로
+   "넘어야 할 숫자"는 플레이 중 화면에 따로 있어야 한다(원칙 6). */
+function nextTarget(score) {
+  var c = Rec.online;
+  if (!c || c.state !== "ok" || !c.rows || !c.rows.length) return null;
+  for (var i = c.rows.length - 1; i >= 0; i--)
+    if (c.rows[i].score > score) return { rank: i + 1, score: c.rows[i].score };
+  return null;                                  // 상위 목록을 전부 넘어섰다
+}
+
 function drawHud(now, s, pend) {
   var top = 14;
   // 남은 시간 바
@@ -704,6 +917,8 @@ function drawHud(now, s, pend) {
 
   centerText(String(s.score), 18, top + 26, 34, COL.text, 800, "left");
   centerText("최고 " + G.best, 18, top + 54, 14, s.score > G.best ? COL.gold : COL.sub, 700, "left");
+  var nt = nextTarget(s.score);
+  if (nt) centerText(nt.rank + "위 " + nt.score, 18, top + 76, 14, COL.live, 700, "left");
 
   var secs = Math.max(0, Math.ceil(s.endTime - Math.max(now, s.t0)));
   if (G.mode === "countin") secs = DIFF.duration;
@@ -718,33 +933,122 @@ function drawHud(now, s, pend) {
   }
 }
 
-function drawOver() {
-  var r = G.result;
-  ctx.fillStyle = "rgba(8,10,15,0.94)";
-  ctx.fillRect(0, 0, W, H);
-  var cy = H * 0.30;
-  centerText("게임 오버", W / 2, cy, Math.min(26, W * 0.07), COL.sub, 700);
-  centerText(String(r.score), W / 2, cy + 58, Math.min(76, W * 0.19), COL.text, 800);
-  var isBest = r.score > 0 && r.score >= G.best;
-  centerText(isBest ? "최고 기록! " + G.best : "최고 " + G.best,
-             W / 2, cy + 110, 17, isBest ? COL.gold : COL.sub, 700);
+/* ────────────────────────────────────────────────────────────────
+   기록 화면 (DOM 오버레이)
+   ──────────────────────────────────────────────────────────────── */
+var elOver = document.getElementById("over"), elScore = document.getElementById("ovScore"),
+    elBest = document.getElementById("ovBest"), elStats = document.getElementById("ovStats"),
+    elNick = document.getElementById("nick"), elSend = document.getElementById("send"),
+    elNote = document.getElementById("ovNote"), elList = document.getElementById("list"),
+    tabAll = document.getElementById("tabAll"), tabMine = document.getElementById("tabMine"),
+    elAgain = document.getElementById("again");
+var scope = "all", sentThisRun = false;
 
-  var rows = [
+function esc(t) {
+  return String(t).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+}
+function fmtDate(t) {
+  var d = new Date(t), p = function (n) { return (n < 10 ? "0" : "") + n; };
+  return (d.getMonth() + 1) + "/" + d.getDate() + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+function row(cls, rank, name, score, sub) {
+  return '<div class="row ' + cls + '"><span class="rk">' + rank + '</span>' +
+    '<span class="nm">' + esc(name) + '</span><span class="sc">' + score + '</span>' +
+    (sub ? '<span class="sub">' + sub + '</span>' : '') + '</div>';
+}
+
+function renderBoard() {
+  if (!elList) return;
+  tabAll.setAttribute("aria-selected", scope === "all" ? "true" : "false");
+  tabMine.setAttribute("aria-selected", scope === "me" ? "true" : "false");
+
+  if (scope === "me") {
+    if (!Rec.runs.length) { elList.innerHTML = '<div class="empty">아직 기록이 없습니다.</div>'; return; }
+    var best = bestScore();
+    var sum = Rec.runs.reduce(function (a, r) { return a + r.score; }, 0);
+    var head = '<div class="row gap">' + Rec.runs.length + '판 · 최고 ' + best +
+               ' · 평균 ' + Math.round(sum / Rec.runs.length) + '</div>';
+    var bestAt = Rec.runs.findIndex(function (x) { return x.score === best; });
+    elList.innerHTML = head + Rec.runs.map(function (r, i) {
+      return row(i === bestAt ? "mine" : "", Rec.runs.length - i, fmtDate(r.t), r.score,
+        "PERFECT " + Math.round(r.perfectRate * 100) + "% · 무음 " + r.bestSilentRun + "박 · ±" + r.avgErrMs + "ms");
+    }).join("");
+    return;
+  }
+
+  var c = Rec.online;
+  if (!c || c.state === "loading") { elList.innerHTML = '<div class="empty">불러오는 중…</div>'; return; }
+  if (c.state === "error") {
+    elList.innerHTML = '<div class="empty">전체 랭킹을 불러오지 못했습니다.<br>' +
+      '네트워크와 상관없이 <b>내 기록</b>은 그대로 남아 있습니다.</div>';
+    return;
+  }
+  if (!c.rows.length) { elList.innerHTML = '<div class="empty">아직 등록된 기록이 없습니다.<br>첫 기록을 올려보세요.</div>'; return; }
+  var html = c.rows.map(function (e, i) {
+    return row(e.player_id === Rec.playerId ? "mine" : "", i + 1, e.name, e.score);
+  }).join("");
+  // 상위 목록에 내가 없으면 내 순위를 맨 아래 고정 행으로 붙인다
+  var mine = bestScore();
+  if (mine && c.rank && !c.rows.some(function (e) { return e.player_id === Rec.playerId; })) {
+    html += '<div class="row gap">⋯</div>' + row("mine", c.rank, Rec.name || "나", mine);
+  }
+  elList.innerHTML = html;
+}
+
+function renderOver() {
+  var r = G.result;
+  if (!r) return;
+  elScore.textContent = r.score;
+  var isBest = r.score > 0 && r.score >= G.best;
+  elBest.textContent = isBest ? "최고 기록! " + G.best : "최고 " + G.best;
+  elBest.className = "bst" + (isBest ? " new" : "");
+  elStats.innerHTML = [
     ["PERFECT 비율", Math.round(r.perfectRate * 100) + "%"],
     ["최장 무음 성공", r.bestSilentRun + "박"],
     ["최고 배율", "×" + r.bestMult],
     ["평균 오차", (r.avgErrMs ? r.avgErrMs.toFixed(0) : "0") + "ms"]
-  ];
-  var y = cy + 160, wBox = Math.min(300, W - 48);
-  for (var i = 0; i < rows.length; i++) {
-    centerText(rows[i][0], W / 2 - wBox / 2, y + i * 30, 15, COL.sub, 600, "left", wBox * 0.6);
-    centerText(rows[i][1], W / 2 + wBox / 2, y + i * 30, 15, COL.text, 700, "right");
-  }
-  var blink = 0.55 + 0.45 * Math.sin(performance.now() / 380);
-  ctx.globalAlpha = blink;
-  centerText("탭해서 다시", W / 2, H * 0.86, Math.min(21, W * 0.055), COL.live, 700);
-  ctx.globalAlpha = 1;
+  ].map(function (x) { return "<div><dt>" + x[0] + "</dt><dd>" + x[1] + "</dd></div>"; }).join("");
+
+  elNick.value = Rec.name;
+  sentThisRun = false;
+  elSend.disabled = r.score <= 0;
+  elSend.textContent = "등록";
+  elNote.textContent = r.score <= 0 ? "0점은 등록하지 않습니다." : "";
+  elNote.className = "note";
+  renderBoard();
+  elOver.classList.add("on");
+  elOver.scrollTop = 0;
 }
+
+function hideOver() { elOver.classList.remove("on"); }
+
+tabAll.addEventListener("click", function () { scope = "all"; loadOnline(); renderBoard(); });
+tabMine.addEventListener("click", function () { scope = "me"; renderBoard(); });
+elAgain.addEventListener("click", function () { hideOver(); startRun(); });
+
+elSend.addEventListener("click", function () {
+  if (sentThisRun || !G.result || G.result.score <= 0) return;
+  var name = (elNick.value || "").trim().slice(0, 12);
+  if (!name) { elNote.textContent = "이름을 입력하세요."; elNote.className = "note warn"; elNick.focus(); return; }
+  Rec.name = name;
+  Store.set("name", name);
+  sentThisRun = true;
+  elSend.disabled = true;
+  elSend.textContent = "보내는 중";
+  elNote.textContent = "";
+  elNote.className = "note";
+  submitOnline(name, G.result.score).then(function (ok) {
+    elSend.textContent = ok ? "등록됨" : "실패";
+    if (!ok) {
+      sentThisRun = false; elSend.disabled = false; elSend.textContent = "다시 등록";
+      elNote.textContent = "전송에 실패했습니다. 내 기록에는 남아 있습니다.";
+      elNote.className = "note warn";
+    }
+    if (ok) { scope = "all"; renderBoard(); }
+  });
+});
 
 var lastMs = 0;
 function frame(ms) {
@@ -759,6 +1063,7 @@ function frame(ms) {
 resize();
 requestAnimationFrame(frame);
 setInterval(scheduler, TICK);
+loadAll();
 
 /* ────────────────────────────────────────────────────────────────
    자동 플레이 / 리플레이 훅 — window.__beat

@@ -5,6 +5,8 @@
 
 한 판 45초. 탭 또는 스페이스 하나로 한다. 미스로 죽지 않는다.
 
+플레이: https://eastar80.github.io/game04/
+
 ## 규칙
 
 박은 **4박 단위 마디**로 흐른다.
@@ -77,7 +79,65 @@
 | 6 넘을 숫자가 보임 | 최고 점수가 플레이 중 상단에 늘 보이고, 넘는 순간 연출이 있다 |
 | 7 주스 | 무음 PERFECT 시 흔들림 강도·상승음 피치·파편 수가 배율에 비례. `prefers-reduced-motion` 존중 |
 | 8 위험-보상 | 무음이 길수록 배율이 커지고, 한 번의 MISS 가 그 전부를 되돌린다 |
-| 9 시스템 하나 | 코어 루프만. 리더보드도 재미 확인 전에는 붙이지 않는다 |
+| 9 시스템 하나 | 코어 루프만. 리더보드는 직접 플레이로 재미를 확인한 뒤에 붙였다 |
+
+## 리더보드
+
+**`전체 랭킹` 과 `내 기록` 두 가지를 본다.** 게임이 끝나면 결과 화면에서 바로 열린다.
+
+### 내 기록 (로컬, 전체 저장)
+
+**끝난 판은 전부 남는다** — 상위 몇 개만이 아니라 전부다. 판마다 점수·PERFECT 비율·
+최장 무음·평균 오차·날짜를 함께 저장하므로, 점수뿐 아니라 **늘고 있는지**가 보인다.
+맨 위에 `N판 · 최고 · 평균` 요약이 붙고 최고 기록 줄이 강조된다. 보관 한도는 500판.
+
+저장은 어댑터를 통한다: `window.storage`(아티팩트 환경, 비동기) → `localStorage` → 메모리.
+stacker 와 같은 형태다.
+
+### 전체 랭킹 (Supabase)
+
+Supabase REST 를 `fetch` 로 직접 부른다. **JS 클라이언트 라이브러리는 쓰지 않는다** —
+"외부 라이브러리 없음" 컨벤션을 지키기 위해서다. 코드에 박힌 키는 공개용(publishable)이라
+HTML 에 그대로 들어가도 된다. 실제 방어는 서버의 RLS 정책과 `CHECK` 제약이 한다.
+
+플레이어는 저장소의 익명 ID(`beat.playerId`)로 구분한다. 로그인은 없다.
+등록은 **수동**이다 — 이름을 넣고 `등록` 을 눌러야 올라간다.
+
+**네트워크가 죽어도 게임은 그대로다.** 6초 안에 응답이 없거나 실패하면 안내로 떨어지고
+`내 기록` 은 그대로 보인다. 제출 실패도 게임을 막지 않으며, 로컬 기록은 이미 저장돼 있다.
+
+플레이 중 좌측 상단에 **바로 위 순위와 그 점수**가 뜬다(`3위 412`). 리더보드는 게임이
+끝나야 보이므로, 넘어야 할 숫자는 플레이 중 화면에 따로 있어야 하기 때문이다(원칙 6).
+
+> 부정 점수는 원리적으로 막을 수 없다 — 게임이 전부 브라우저에서 돌기 때문이다. 지금은
+> 서버의 `CHECK` 제약으로 말이 안 되는 값만 거른다. **점수에 영향을 주는 난수가 없어**
+> 입력 기록만으로 재현되므로, 서버가 리플레이해 점수를 계산하는 방식이 가능하다.
+> 그때는 서버 코드가 필요하다(Workers/Edge Function).
+
+### 테이블 만들기
+
+stacker 의 `scores` 테이블은 `stage` 제약이 stacker 단계 이름으로 묶여 있어 재사용할 수
+없다. 같은 Supabase 프로젝트에 **새 테이블**을 만든다. SQL 편집기에서 한 번 실행한다:
+
+```sql
+create table public.beat_scores (
+  id          bigint generated always as identity primary key,
+  name        text   not null check (char_length(name) between 1 and 12),
+  score       int    not null check (score >= 0 and score <= 1000),
+  player_id   text   not null check (char_length(player_id) between 8 and 64),
+  created_at  timestamptz not null default now()
+);
+
+alter table public.beat_scores enable row level security;
+create policy "누구나 읽기"   on public.beat_scores for select using (true);
+create policy "누구나 등록"   on public.beat_scores for insert with check (true);
+
+create index beat_scores_rank on public.beat_scores (score desc, created_at asc);
+```
+
+`score` 상한 1000 의 근거: 45초 · 100bpm 에서 **이론 최대는 672점**이다
+(모든 박을 PERFECT 로 치는 σ=0 봇으로 계산). 튜닝 여유를 두고 1000 으로 잡았다.
+`duration` 을 올리면 이 상한도 같이 올려야 한다 — 60초면 이론 최대가 933 이다.
 
 ## 자동 플레이 테스트
 
@@ -105,6 +165,7 @@ npm install && npm test
 - 봇 입력 기록으로 `replay()` 를 다시 돌리면 점수가 **완전히 같다**(원칙 1 검증).
 - 같은 입력을 30/60/120/240Hz 진행 간격으로 돌려도 결과가 **같다**(주사율 독립).
 - **첫 판 회귀**: 늦게 깨는 `AudioContext` 를 주입해도 카운트인이 얼지 않고 박 간격이 0.6초로 균일하다.
+- **기록**: 끝난 판이 전부 저장되고 새로고침해도 남는다. 랭킹 서버가 막혀도 게임과 내 기록은 멀쩡하다.
 
 **이 수치는 밸런스 확인용이지 재미의 증거가 아니다.** 재미는 직접 10판 해보고 판단한다.
 

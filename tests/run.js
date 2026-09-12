@@ -20,9 +20,12 @@ const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
     args: ['--autoplay-policy=no-user-gesture-required', '--mute-audio']
   });
   const page = await browser.newPage();
+  // 리더보드 엔드포인트로 나가는 요청은 이 환경에서 프록시가 막는다.
+  // 그건 게임의 에러가 아니라 오프라인 경로 그 자체다 — 따로 검증한다([8]).
+  const isNet = t => /ERR_|Failed to load resource|Failed to fetch|NetworkError/i.test(t);
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
-  page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+  page.on('console', m => { if (m.type() === 'error' && !isNet(m.text())) errors.push(m.text()); });
   await page.goto(PAGE);
   await page.waitForFunction(() => !!window.__beat);
 
@@ -112,6 +115,7 @@ const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
   const cp = await cold.newPage();
   const coldErrors = [];
   cp.on('pageerror', e => coldErrors.push(String(e)));
+  cp.on('console', m => { if (m.type() === 'error' && !isNet(m.text())) coldErrors.push(m.text()); });
   await cp.addInitScript(wake => {
     const Real = window.AudioContext;
     function Slow() { this._ac = new Real(); this._born = performance.now(); this._resumed = false; }
@@ -164,6 +168,59 @@ const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
     firstRun.gaps.map(g => g.toFixed(3)).join(' '));
   check('첫 판 런타임 에러 없음', coldErrors.length === 0, coldErrors.join(' | '));
   await cold.close();
+
+  console.log('\n[8] 기록 — 전체 기록 저장과 오프라인 견딤');
+  // 한 판을 3초로 줄여서 여러 판을 돌린다(DIFFS 표 하나만 고치면 되는 구조 그대로).
+  const playOnce = async (pg, taps) => pg.evaluate(async n => {
+    window.__beat.DIFFS.기본.duration = 3;
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    await window.__beat.reset();
+    for (let i = 0; i < n; i++) {
+      const bt = window.__beat.nextBeatTime;
+      if (bt === null) break;
+      while (window.__beat.now() < bt - 0.25) await sleep(8);
+      window.__beat.tap(bt);
+      while (window.__beat.now() < bt + 0.03) await sleep(2);
+    }
+    for (let i = 0; i < 300 && !window.__beat.state.finished; i++) await sleep(20);
+    return window.__beat.state;
+  }, taps);
+
+  const before = await page.evaluate(() => JSON.parse(localStorage.getItem('beat.runs') || '[]').length);
+  const s1 = await playOnce(page, 4);
+  check('판이 끝나면 게임 오버 화면이 뜬다', await page.isVisible('#over.on'), 'mode ' + s1.mode);
+  const after = await page.evaluate(() => JSON.parse(localStorage.getItem('beat.runs') || '[]').length);
+  check('끝난 판이 전체 기록에 1줄 쌓인다', after === before + 1, before + ' → ' + after);
+
+  await playOnce(page, 3);
+  const runs = await page.evaluate(() => JSON.parse(localStorage.getItem('beat.runs') || '[]'));
+  check('여러 판이 누적된다', runs.length === before + 2, '총 ' + runs.length + '판');
+  check('각 판의 지표가 함께 저장된다',
+    runs[0] && ['t', 'score', 'perfectRate', 'bestSilentRun', 'avgErrMs'].every(k => k in runs[0]),
+    Object.keys(runs[0] || {}).join(','));
+
+  // 네트워크가 막힌 채로도 게임과 내 기록은 그대로여야 한다
+  await page.click('#tabAll');
+  await page.waitForFunction(() => !/불러오는 중/.test(document.getElementById('list').textContent),
+    null, { timeout: 15000 });
+  const allText = await page.textContent('#list');
+  check('전체 랭킹 실패 시 안내로 떨어진다(게임은 멈추지 않는다)', /불러오지 못했습니다/.test(allText),
+    allText.trim().slice(0, 40));
+  await page.click('#tabMine');
+  const mineText = await page.textContent('#list');
+  check('네트워크가 죽어도 내 기록은 보인다', /판 · 최고/.test(mineText), mineText.trim().split('\n')[0].slice(0, 40));
+
+  const reloaded = await page.evaluate(() => JSON.parse(localStorage.getItem('beat.runs') || '[]').length);
+  await page.reload();
+  await page.waitForFunction(() => !!window.__beat && window.__beat.state.best >= 0);
+  await page.waitForFunction(exp => JSON.parse(localStorage.getItem('beat.runs') || '[]').length === exp,
+    reloaded, { timeout: 5000 });
+  const bestAfter = await page.evaluate(() => window.__beat.state.best);
+  const bestOfRuns = Math.max(...runs.map(r => r.score));
+  check('새로고침해도 전체 기록과 최고 점수가 남는다', bestAfter === bestOfRuns,
+    '최고 ' + bestAfter + ' / 기록상 ' + bestOfRuns);
+
+  await page.evaluate(() => { window.__beat.DIFFS.기본.duration = 45; });
 
   console.log('\n[6] 런타임 에러 재확인');
   check('전체 실행 중 에러 없음', errors.length === 0, errors.join(' | '));
