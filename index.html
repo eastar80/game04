@@ -344,9 +344,35 @@ var offsetMs = Store.num("offset", 0);
 
 function guardSec() { return 0.030 + Math.max(0, -offsetMs / 1000); }
 
+var clockAlive = false;
+
+/* 오디오 시계가 실제로 흐르기 시작한 뒤에 판을 시작한다.
+   AudioContext 는 suspended 동안 currentTime 이 0에 멈춰 있고 resume() 은 비동기다.
+   멈춘 시계로 t0 를 잡으면 첫 판만 카운트인이 얼어붙고 박이 통째로 틀어진다.
+   state === "running" 만으로는 부족하다 — currentTime 이 두 번 다르게 읽혀야 진짜 흐르는 것이다. */
+function whenClockRunning(cb) {
+  if (clockAlive && AC.state === "running") { cb(); return; }
+  var seen = AC.currentTime, tries = 0;
+  (function poll() {
+    if (AC.state !== "running") { try { AC.resume(); } catch (e) {} }
+    var t = AC.currentTime;
+    if (AC.state === "running" && t > seen) { clockAlive = true; cb(); return; }
+    if (t < seen) seen = t;
+    if (++tries > 250) { clockAlive = true; cb(); return; }   // 4초 넘게 안 깨면 그냥 간다
+    setTimeout(poll, 16);
+  })();
+}
+
 function startRun() {
   audioInit();
-  if (AC.state === "suspended") AC.resume();
+  G.mode = "boot";                 // 시계가 깰 때까지는 판을 만들지 않는다
+  G.eng = null; G.result = null; G.countIn = [];
+  fx.judge = null; fx.parts.length = 0; fx.pulse = -99; fx.shake = 0; fx.flash = 0;
+  fx.bestGlow = 0; fx.bestMsg = 0;
+  whenClockRunning(beginRun);
+}
+
+function beginRun() {
   syncClock();
   var bd = 60 / DIFF.bpm;
   var lead = 0.35;
@@ -358,11 +384,8 @@ function startRun() {
   G.eng.start();
   G.inputs = [];
   G.beatBest = false;
-  G.result = null;
-  G.mode = "countin";
   evCursor = 0;
-  fx.judge = null; fx.parts.length = 0; fx.pulse = -99; fx.shake = 0; fx.flash = 0;
-  fx.bestGlow = 0; fx.bestMsg = 0;
+  G.mode = "countin";
 }
 
 function endRun() {
@@ -424,6 +447,7 @@ function drainEvents() {
    입력
    ──────────────────────────────────────────────────────────────── */
 function onTapRaw(tsMs) {
+  if (G.mode === "boot") return;              // 시계 깨는 중
   if (G.mode === "title") { startRun(); return; }
   if (G.mode === "over") {
     if (audioNow() - G.overAt < 0.6) return;       // 오발 방지
@@ -509,7 +533,7 @@ function draw(now) {
     ctx.translate(Math.cos(a) * fx.shake, Math.sin(a) * fx.shake);
   }
 
-  if (G.mode === "title") { drawTitle(); }
+  if (G.mode === "title" || G.mode === "boot") { drawTitle(); }
   else { drawPlay(now); }
 
   if (fx.flash > 0.02) {
@@ -546,7 +570,8 @@ function drawTitle() {
   centerText("최고 " + G.best, W / 2, cy + 132, 17, COL.gold, 700);
   var blink = 0.55 + 0.45 * Math.sin(performance.now() / 380);
   ctx.globalAlpha = blink;
-  centerText("탭 또는 스페이스로 시작", W / 2, H * 0.80, Math.min(20, W * 0.05), COL.text, 600, "center", mw);
+  centerText(G.mode === "boot" ? "소리 준비 중…" : "탭 또는 스페이스로 시작",
+             W / 2, H * 0.80, Math.min(20, W * 0.05), COL.text, 600, "center", mw);
   ctx.globalAlpha = 1;
 }
 
@@ -804,7 +829,7 @@ window.__beat = {
   get state() {
     var s = G.eng && G.eng.s, p = G.eng && G.eng.pending();
     return {
-      mode: G.mode, best: G.best, offsetMs: offsetMs,
+      mode: G.mode, best: G.best, offsetMs: offsetMs, t0: G.t0,
       score: s ? s.score : 0, combo: s ? s.combo : 0,
       mult: p ? p.mult : 1, silent: !!(p && p.silent),
       silenceLen: p && p.silent ? p.silenceLen : 0,
@@ -817,6 +842,7 @@ window.__beat = {
   get nextBeatTime() { var b = G.eng && G.eng.pending(); return b ? b.time : null; },
   now: function () { return audioNow(); },
   tap: function (atAudioTime) {
+    if (G.mode === "boot") return null;
     if (G.mode === "title" || G.mode === "over") { startRun(); return null; }
     var t = typeof atAudioTime === "number" ? atAudioTime : audioNow();
     if (G.mode === "countin") { if (t < G.t0 - DIFF.good) return null; G.mode = "play"; }
@@ -827,7 +853,12 @@ window.__beat = {
     if (G.eng.s.finished) endRun();
     return ev;
   },
-  reset: function () { startRun(); },
+  reset: function () {                    // 시계가 깨야 시작되므로 비동기다
+    startRun();
+    return new Promise(function (res) {
+      (function w() { if (G.mode !== "boot") return res(window.__beat.state); setTimeout(w, 8); })();
+    });
+  },
   inputs: function () { return G.inputs.slice(); },
   replay: headless,
   replayStepped: headlessStepped,

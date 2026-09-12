@@ -81,7 +81,7 @@ const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
 
   console.log('\n[5] 실제 페이지에서 라이브 판정');
   const live = await page.evaluate(async () => {
-    window.__beat.reset();
+    await window.__beat.reset();
     const log = [];
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     for (let i = 0; i < 14; i++) {
@@ -99,6 +99,71 @@ const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
   check('콤보가 쌓임', live.state.combo >= 10, '콤보 ' + live.state.combo);
   check('오디오 시계가 흐름', live.state.remaining < 60 && live.state.remaining > 0,
     '남은 ' + live.state.remaining.toFixed(1) + '초');
+
+  console.log('\n[7] 첫 판 회귀 — 오디오 시계가 깨기 전에 판을 시작하지 않는가');
+  // 예전 버그: resume() 은 비동기이고 suspended 인 AudioContext 는 currentTime 이 0에 멈춰 있는데,
+  // 그 죽은 시계로 t0 를 잡았다. 그래서 첫 판만 카운트인이 얼어붙고 박이 통째로 틀어졌다.
+  // 헤드리스 크로미엄은 5ms 만에 깨어나 자연 재현이 안 되므로, 스펙이 허용하는
+  // "늦게 깨는 컨텍스트"를 주입해 그 조건을 만든다.
+  const WAKE_MS = 600;
+  const cold = await chromium.launch({
+    executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--mute-audio']
+  });
+  const cp = await cold.newPage();
+  const coldErrors = [];
+  cp.on('pageerror', e => coldErrors.push(String(e)));
+  await cp.addInitScript(wake => {
+    const Real = window.AudioContext;
+    function Slow() { this._ac = new Real(); this._born = performance.now(); this._resumed = false; }
+    Slow.prototype._live = function () { return this._resumed && performance.now() - this._born >= wake; };
+    Slow.prototype.resume = function () { this._resumed = true; return this._ac.resume(); };
+    Slow.prototype.createGain = function () { return this._ac.createGain(); };
+    Slow.prototype.createOscillator = function () { return this._ac.createOscillator(); };
+    Object.defineProperty(Slow.prototype, 'state', { get() { return this._live() ? this._ac.state : 'suspended'; } });
+    Object.defineProperty(Slow.prototype, 'currentTime', { get() { return this._live() ? this._ac.currentTime : 0; } });
+    Object.defineProperty(Slow.prototype, 'destination', { get() { return this._ac.destination; } });
+    window.AudioContext = Slow; window.webkitAudioContext = Slow;
+  }, WAKE_MS);
+  await cp.goto(PAGE);
+  await cp.waitForFunction(() => !!window.__beat);
+
+  await cp.mouse.click(200, 400);                 // 진짜 제스처로 첫 판 시작
+  await cp.waitForFunction(() => window.__beat.state.mode !== 'boot', null, { timeout: 10000 });
+
+  // 핵심 불변식: 판이 시작되는 순간 첫 판정 박까지 남은 시간은 lead(0.35) + 카운트인 4박(2.4) = 2.75초.
+  // 죽은 시계로 t0 를 잡으면 그만큼(여기선 0.6초) 줄어든 값이 나온다.
+  const lead = await cp.evaluate(() => window.__beat.state.t0 - window.__beat.now());
+  check('첫 박까지 2.75초 — 죽은 시계로 t0 를 잡지 않았다',
+    Math.abs(lead - 2.75) < 0.08, lead.toFixed(3) + '초 (버그 시 약 ' + (2.75 - WAKE_MS / 1000).toFixed(2) + '초)');
+
+  const clockMoved = await cp.evaluate(async () => {
+    const a = window.__beat.now();
+    await new Promise(r => setTimeout(r, 300));
+    return window.__beat.now() - a;
+  });
+  check('첫 판 시작 시점에 오디오 시계가 흐르고 있다', clockMoved > 0.25 && clockMoved < 0.4,
+    '300ms 동안 ' + (clockMoved * 1000).toFixed(0) + 'ms 진행');
+
+  const firstRun = await cp.evaluate(async () => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const seen = [], log = [];
+    for (let i = 0; i < 8; i++) {
+      const bt = window.__beat.nextBeatTime;
+      if (bt === null) { await sleep(20); continue; }
+      while (window.__beat.now() < bt - 0.25) await sleep(8);
+      seen.push(bt);
+      const ev = window.__beat.tap(bt);
+      if (ev) log.push(ev.judge);
+      while (window.__beat.now() < bt + 0.03) await sleep(2);
+    }
+    return { log, gaps: seen.slice(1).map((t, i) => t - seen[i]) };
+  });
+  check('첫 판에서도 정박 탭이 전부 PERFECT', firstRun.log.length >= 6 && firstRun.log.every(j => j === 'PERFECT'),
+    firstRun.log.join(' ') || '판정 없음');
+  check('첫 판 박 간격이 0.6초로 균일', firstRun.gaps.every(g => Math.abs(g - 0.6) < 0.002),
+    firstRun.gaps.map(g => g.toFixed(3)).join(' '));
+  check('첫 판 런타임 에러 없음', coldErrors.length === 0, coldErrors.join(' | '));
+  await cold.close();
 
   console.log('\n[6] 런타임 에러 재확인');
   check('전체 실행 중 에러 없음', errors.length === 0, errors.join(' | '));

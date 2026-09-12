@@ -87,6 +87,7 @@ npm install && npm test
 
 `window.__beat` 훅: `state`, `nextBeatTime`, `tap(atAudioTime)`, `reset()`, `replay(inputs)`,
 `replayStepped(inputs, stepSec)`, `bot(sigmaMs, seed)`.
+`reset()` 은 오디오 시계가 깬 뒤에 판이 시작되므로 Promise 를 돌려준다 — `await` 해야 한다.
 
 오차 σ 가우시안으로 박을 노리는 봇 3종, 각 20판:
 
@@ -103,6 +104,7 @@ npm install && npm test
   요청서에서 예상한 대로 나왔다.
 - 봇 입력 기록으로 `replay()` 를 다시 돌리면 점수가 **완전히 같다**(원칙 1 검증).
 - 같은 입력을 30/60/120/240Hz 진행 간격으로 돌려도 결과가 **같다**(주사율 독립).
+- **첫 판 회귀**: 늦게 깨는 `AudioContext` 를 주입해도 카운트인이 얼지 않고 박 간격이 0.6초로 균일하다.
 
 **이 수치는 밸런스 확인용이지 재미의 증거가 아니다.** 재미는 직접 10판 해보고 판단한다.
 
