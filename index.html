@@ -20,7 +20,12 @@
   #panel h3{font-size:13px;font-weight:600;color:#8496b0;margin-bottom:11px;letter-spacing:.02em}
   #panel label{display:flex;justify-content:space-between;font-size:13px;color:#c3d0e2;margin-bottom:7px}
   #panel label b{color:#5ad1ff;font-variant-numeric:tabular-nums}
-  #off{width:100%;accent-color:#5ad1ff}
+  #off{width:100%;height:22px;background:transparent;-webkit-appearance:none;appearance:none}
+  #off::-webkit-slider-runnable-track{height:4px;border-radius:3px;background:#26304a}
+  #off::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;margin-top:-6px;
+    border:0;border-radius:50%;background:#5ad1ff}
+  #off::-moz-range-track{height:4px;border-radius:3px;background:#26304a}
+  #off::-moz-range-thumb{width:16px;height:16px;border:0;border-radius:50%;background:#5ad1ff}
   #panel p{font-size:11.5px;line-height:1.55;color:#6b7c95;margin-top:10px}
 </style>
 </head>
