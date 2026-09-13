@@ -982,6 +982,7 @@ function renderBoard() {
   if (!c || c.state === "loading") { elList.innerHTML = '<div class="empty">불러오는 중…</div>'; return; }
   if (c.state === "error") {
     elList.innerHTML = '<div class="empty">전체 랭킹을 불러오지 못했습니다.<br>' +
+      '미리보기(아티팩트)에서는 외부 연결이 막혀 있어 <b>배포판에서만</b> 동작합니다.<br>' +
       '네트워크와 상관없이 <b>내 기록</b>은 그대로 남아 있습니다.</div>';
     return;
   }
@@ -1043,7 +1044,7 @@ elSend.addEventListener("click", function () {
     elSend.textContent = ok ? "등록됨" : "실패";
     if (!ok) {
       sentThisRun = false; elSend.disabled = false; elSend.textContent = "다시 등록";
-      elNote.textContent = "전송에 실패했습니다. 내 기록에는 남아 있습니다.";
+      elNote.textContent = "전송 실패 — 미리보기에서는 외부 연결이 막힙니다. 내 기록에는 남아 있습니다.";
       elNote.className = "note warn";
     }
     if (ok) { scope = "all"; renderBoard(); }
