@@ -109,7 +109,7 @@
 var DIFFS = {
   기본: {
     bpm: 100,            // 박 간격 0.6초
-    duration: 45,        // 한 판 길이(초)
+    duration: 30,        // 한 판 길이(초)
     perfect: 0.040,      // PERFECT 판정 ±초
     good: 0.090,         // GOOD 판정 ±초 (= 놓침 판정 시각)
     countIn: 4,          // 시작 카운트인 박 수(판정 없음)
@@ -973,7 +973,8 @@ function renderBoard() {
     var bestAt = Rec.runs.findIndex(function (x) { return x.score === best; });
     elList.innerHTML = head + Rec.runs.map(function (r, i) {
       return row(i === bestAt ? "mine" : "", Rec.runs.length - i, fmtDate(r.t), r.score,
-        "PERFECT " + Math.round(r.perfectRate * 100) + "% · 무음 " + r.bestSilentRun + "박 · ±" + r.avgErrMs + "ms");
+        "콤보 " + (r.maxCombo || 0) + " · PERFECT " + Math.round(r.perfectRate * 100) +
+        "% · 무음 " + r.bestSilentRun + "박 · ±" + r.avgErrMs + "ms");
     }).join("");
     return;
   }
@@ -1006,9 +1007,9 @@ function renderOver() {
   elBest.textContent = isBest ? "최고 기록! " + G.best : "최고 " + G.best;
   elBest.className = "bst" + (isBest ? " new" : "");
   elStats.innerHTML = [
+    ["최대 콤보", String(r.maxCombo)],
     ["PERFECT 비율", Math.round(r.perfectRate * 100) + "%"],
-    ["최장 무음 성공", r.bestSilentRun + "박"],
-    ["최고 배율", "×" + r.bestMult],
+    ["최장 무음 성공", r.bestSilentRun > 0 ? r.bestSilentRun + "박 ×" + r.bestSilentRun : "0박"],
     ["평균 오차", (r.avgErrMs ? r.avgErrMs.toFixed(0) : "0") + "ms"]
   ].map(function (x) { return "<div><dt>" + x[0] + "</dt><dd>" + x[1] + "</dd></div>"; }).join("");
 

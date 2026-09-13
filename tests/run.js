@@ -220,7 +220,7 @@ const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
   check('새로고침해도 전체 기록과 최고 점수가 남는다', bestAfter === bestOfRuns,
     '최고 ' + bestAfter + ' / 기록상 ' + bestOfRuns);
 
-  await page.evaluate(() => { window.__beat.DIFFS.기본.duration = 45; });
+  await page.evaluate(() => { window.__beat.DIFFS.기본.duration = 30; });
 
   console.log('\n[6] 런타임 에러 재확인');
   check('전체 실행 중 에러 없음', errors.length === 0, errors.join(' | '));
