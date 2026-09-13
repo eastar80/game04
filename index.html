@@ -494,6 +494,7 @@ try {
 
 var COL = {
   bg: "#080a0f", live: "#5ad1ff", silent: "#2a3346",
+  tag: "#5f7391",
   early: "#57b8ff", late: "#ff5a5a", gold: "#ffd24a", text: "#e8eef7", sub: "#7a8ba5"
 };
 
@@ -764,20 +765,40 @@ function centerText(txt, x, y, size, color, weight, align, maxW) {
 }
 
 function drawTitle() {
-  var cy = H * 0.42;
-  var mw = W - 40, sz = Math.min(19, W * 0.048);
-  centerText("숨은 박", W / 2, cy - 46, Math.min(62, W * 0.15), COL.text, 800, "center", mw);
-  centerText("들리는 박에 맞춰 탭하세요.", W / 2, cy + 18, sz, COL.sub, 500, "center", mw);
-  centerText("소리는 사라지지만 박은 계속됩니다.", W / 2, cy + 46, sz, COL.sub, 500, "center", mw);
-  centerText("무음에서 맞힐수록 배율이 커집니다.", W / 2, cy + 74, sz, COL.live, 600, "center", mw);
-  centerText("최고 " + G.best, W / 2, cy + 132, 17, COL.gold, 700);
+  var mw = W - 40;
+  var szT = Math.min(62, W * 0.15);          // 제목
+  var szG = Math.min(15.5, W * 0.04);        // 태그라인
+  var szB = Math.min(19, W * 0.048);         // 설명
+  // 태그라인만 영어다. 기능 UI 가 아니라 게임의 한 줄 정체성이라 그대로 둔다(CLAUDE.md 참고).
+  var lines = [
+    { t: "숨은 박",                          s: szT, c: COL.text, w: 800, gap: szT * 0.42 },
+    { t: "When the sound disappears,",       s: szG, c: COL.tag,  w: 500, gap: szG * 0.42, ls: "0.07em" },
+    { t: "can you keep the beat?",           s: szG, c: COL.tag,  w: 500, gap: szG * 1.9,  ls: "0.07em" },
+    { t: "들리는 박에 맞춰 탭하세요.",           s: szB, c: COL.sub,  w: 500, gap: szB * 0.5 },
+    { t: "소리는 사라지지만 박은 계속됩니다.",     s: szB, c: COL.sub,  w: 500, gap: szB * 0.5 },
+    { t: "무음에서 맞힐수록 배율이 커집니다.",     s: szB, c: COL.live, w: 600, gap: szB * 1.8 },
+    { t: "최고 " + G.best,                    s: 17,  c: COL.gold, w: 700, gap: 0 }
+  ];
+
+  // 줄을 하나의 블록으로 쌓아 남은 공간 가운데에 놓는다.
+  // 고정 오프셋으로 두면 낮은 화면(가로 모드 등)에서 시작 안내와 겹친다.
+  var startY = H * 0.86, avail = startY - 34, h = 0, i;
+  for (i = 0; i < lines.length; i++) h += lines[i].s + lines[i].gap;
+  var y = Math.max(20, (avail - h) / 2);
+  for (i = 0; i < lines.length; i++) {
+    var L = lines[i];
+    if (L.ls) try { ctx.letterSpacing = L.ls; } catch (e) {}
+    centerText(L.t, W / 2, y + L.s / 2, L.s, L.c, L.w, "center", mw);
+    if (L.ls) try { ctx.letterSpacing = "0px"; } catch (e) {}
+    y += L.s + L.gap;
+  }
+
   var blink = 0.55 + 0.45 * Math.sin(performance.now() / 380);
   ctx.globalAlpha = blink;
   centerText(G.mode === "boot" ? "소리 준비 중…" : "탭 또는 스페이스로 시작",
-             W / 2, H * 0.80, Math.min(20, W * 0.05), COL.text, 600, "center", mw);
+             W / 2, startY, Math.min(20, W * 0.05), COL.text, 600, "center", mw);
   ctx.globalAlpha = 1;
 }
-
 function drawPlay(now) {
   var s = G.eng.s;
   var pend = G.eng.pending();
