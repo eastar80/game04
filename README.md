@@ -210,3 +210,14 @@ npm install && npm test
 그 뒤 `main` 에 푸시하거나 Actions 탭에서 `Deploy to GitHub Pages` 를 직접 실행하면 된다.
 
 **전체 랭킹은 이 배포판에서만 동작한다** — 아티팩트 미리보기는 CSP 가 외부 요청을 막는다.
+
+### 커스텀 도메인
+
+`CNAME` 파일(`silentbeat.mrdion.kim`)이 저장소 루트에 있고, 워크플로가 `path: .` 로 통째로
+올리므로 배포 아티팩트에 함께 들어간다. **Actions 로 배포할 때는 이 파일이 커스텀 도메인
+등록을 겸한다** — 이게 없으면 GitHub 이 요청을 어느 저장소로 보낼지 몰라 기본 인증서를
+내주고 브라우저가 `ERR_CERT_COMMON_NAME_INVALID` 를 띄운다.
+
+DNS 는 `silentbeat` CNAME → `eastar80.github.io`. 도메인을 바꾸려면 `CNAME` 파일과 DNS 를
+같이 고친다. 첫 등록 뒤 인증서 발급에 몇 분 걸리고, 발급되면 Settings → Pages 에서
+**Enforce HTTPS** 를 켠다.
