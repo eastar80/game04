@@ -22,9 +22,9 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # Pages 는 저장소 Settings → Pages → Source = GitHub Actions 로 한 번 켜야 한다.
+      # GITHUB_TOKEN 으로는 사이트 생성이 안 된다(Resource not accessible by integration).
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true   # 저장소에 Pages 가 아직 켜져 있지 않으면 켠다
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .

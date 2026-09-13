@@ -193,3 +193,14 @@ npm install && npm test
 ```
 | 4th-game (숨은 박) | 리듬 | ? | ? |
 ```
+
+## 배포 (GitHub Pages)
+
+`main` 에 푸시하면 `.github/workflows/pages.yml` 이 배포한다. 다만 **저장소에서 Pages 를
+한 번은 손으로 켜야 한다** — `GITHUB_TOKEN` 으로는 사이트 생성이 되지 않는다
+(`Create Pages site failed: Resource not accessible by integration`).
+
+저장소 **Settings → Pages → Build and deployment → Source** 를 **GitHub Actions** 로.
+그 뒤 `main` 에 푸시하거나 Actions 탭에서 `Deploy to GitHub Pages` 를 직접 실행하면 된다.
+
+**전체 랭킹은 이 배포판에서만 동작한다** — 아티팩트 미리보기는 CSP 가 외부 요청을 막는다.
