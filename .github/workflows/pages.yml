@@ -23,6 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true   # 저장소에 Pages 가 아직 켜져 있지 않으면 켠다
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .
